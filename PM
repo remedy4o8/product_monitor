@@ -104,12 +104,9 @@ class ProductMonitor:
 
 # Example usage, this should be managed via a configuration.
 urls = [
-    "https://littlesleepies.com/collections/vip-early-access/products.json",
-    "https://poshpeanut.com/collections/vip-shop-early/products.json",
-    "https://www.gruntstyle.com/collections/new/products.json",
-    "https://www.100percentpure.com/collections/new/products.json"
+    ""
 ]
-webhook_url = "https://discord.com/api/webhooks/1232568539664220180/WpiZ1yafDFwFaNtyV4gSzqTQMIlt2GIG5xEhYNo6bb62u1fcOGlZTMWVraDAEZcu3J7X"
+webhook_url = ""
 
 # To run:
 monitor = ProductMonitor(urls, webhook_url)
