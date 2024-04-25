@@ -1,0 +1,116 @@
+import requests
+import json
+import schedule
+import time
+from urllib.parse import urlparse
+import logging
+
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class ProductMonitor:
+    def __init__(self, urls, webhook_url):
+        """
+        Initialize the ProductMonitor with a list of URLs to monitor and a webhook URL for notifications.
+        """
+        self.urls = urls
+        self.webhook_url = webhook_url
+        self.previous_data = {}
+
+    def fetch_products_json(self, url):
+        """
+        Fetch the JSON data from the given URL and return a dictionary of products.
+        """
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            return {product['title']: product for product in data.get('products', [])}
+        except requests.RequestException as e:
+            logging.error(f"Failed to fetch products from {url}: {str(e)}")
+            return {}
+        except json.JSONDecodeError:
+            logging.error(f"JSON decoding failed for the data from {url}")
+            return {}
+
+    def detect_changes(self, old_data, new_data):
+        """
+        Detect and return changes in the product listings between old and new data.
+        """
+        old_titles = set(old_data.keys())
+        new_titles = set(new_data.keys())
+        added = new_titles - old_titles
+        removed = old_titles - new_titles
+
+        changes = {
+            'added': {title: new_data[title] for title in added},
+            'removed': {title: old_data[title] for title in removed}
+        }
+        return changes
+
+    def send_to_discord(self, message):
+        """
+        Send a message to a Discord webhook, splitting it into chunks if necessary due to Discord's message length limit.
+        """
+        max_length = 2000
+        parts = [message[i:i + max_length] for i in range(0, len(message), max_length)]
+
+        for part in parts:
+            data = {"content": part}
+            try:
+                response = requests.post(self.webhook_url, json=data)
+                response.raise_for_status()
+            except requests.RequestException as e:
+                logging.error(f"Failed to send message to Discord: {str(e)}")
+
+    def monitor_products(self, url):
+        """
+        Monitor product changes and notify via Discord if changes are detected.
+        """
+        domain = urlparse(url).netloc
+        current_data = self.fetch_products_json(url)
+        if domain in self.previous_data and self.previous_data[domain]:
+            changes = self.detect_changes(self.previous_data[domain], current_data)
+            if changes and (changes['added'] or changes['removed']):
+                for title, details in changes['added'].items():
+                    product_url = f"https://{domain}/products/{details['handle']}"
+                    message = f"Added Product: **[{title}]({product_url})**\n"
+                    for variant in details.get('variants', []):
+                        variant_id = variant.get('id')
+                        price = variant.get('price')
+                        size = variant.get('option1')
+                        variant_url = f"https://{domain}/cart/{variant_id}:1"  # URL format for the variant
+                        message += f"   [{variant_id}]({variant_url}), {size}  \n"
+                    self.send_to_discord(message)
+                for title, details in changes['removed'].items():
+                    product_url = f"https://{domain}/products/{details['handle']}"
+                    message = f"Removed Product: **[{title}]({product_url})**\n"
+                    self.send_to_discord(message)
+            else:
+                logging.info(f"No changes detected for {domain}.")
+        else:
+            logging.info(f"Monitoring started for {domain}, waiting for next check to detect changes.")
+        self.previous_data[domain] = current_data
+
+    def run(self):
+        """
+        Schedule the monitoring tasks and run them.
+        """
+        for url in self.urls:
+            schedule.every(5).minutes.do(self.monitor_products, url)
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+
+# Example usage, this should be managed via a configuration.
+urls = [
+    "https://littlesleepies.com/collections/vip-early-access/products.json",
+    "https://poshpeanut.com/collections/vip-shop-early/products.json",
+    "https://www.gruntstyle.com/collections/new/products.json",
+    "https://www.100percentpure.com/collections/new/products.json"
+]
+webhook_url = "https://discord.com/api/webhooks/1232568539664220180/WpiZ1yafDFwFaNtyV4gSzqTQMIlt2GIG5xEhYNo6bb62u1fcOGlZTMWVraDAEZcu3J7X"
+
+# To run:
+monitor = ProductMonitor(urls, webhook_url)
+monitor.run()
