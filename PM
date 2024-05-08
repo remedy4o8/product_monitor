@@ -2,6 +2,8 @@ import requests
 import json
 import schedule
 import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from urllib.parse import urlparse
 import logging
 
@@ -10,22 +12,29 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 class ProductMonitor:
     def __init__(self, urls, webhook_url):
-        """
-        Initialize the ProductMonitor with a list of URLs to monitor and a webhook URL for notifications.
-        """
         self.urls = urls
         self.webhook_url = webhook_url
         self.previous_data = {}
+        self.session = self.create_session()
+
+    def create_session(self):
+        session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]  # Corrected from 'method_whitelist' to 'allowed_methods'
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        return session
 
     def fetch_products_json(self, url):
-        """
-        Fetch the JSON data from the given URL and return a dictionary of products.
-        """
         try:
-            response = requests.get(url)
+            response = self.session.get(url, timeout=20)  # Increased timeout
             response.raise_for_status()
-            data = response.json()
-            return {product['title']: product for product in data.get('products', [])}
+            return {product['title']: product for product in response.json().get('products', [])}
         except requests.RequestException as e:
             logging.error(f"Failed to fetch products from {url}: {str(e)}")
             return {}
@@ -34,80 +43,58 @@ class ProductMonitor:
             return {}
 
     def detect_changes(self, old_data, new_data):
-        """
-        Detect and return changes in the product listings between old and new data.
-        """
-        old_titles = set(old_data.keys())
-        new_titles = set(new_data.keys())
-        added = new_titles - old_titles
-        removed = old_titles - new_titles
-
-        changes = {
-            'added': {title: new_data[title] for title in added},
-            'removed': {title: old_data[title] for title in removed}
-        }
-        return changes
+        added = {title: new_data[title] for title in new_data.keys() - old_data.keys()}
+        removed = {title: old_data[title] for title in old_data.keys() - new_data.keys()}
+        return {'added': added, 'removed': removed}
 
     def send_to_discord(self, message):
-        """
-        Send a message to a Discord webhook, splitting it into chunks if necessary due to Discord's message length limit.
-        """
-        max_length = 2000
-        parts = [message[i:i + max_length] for i in range(0, len(message), max_length)]
-
+        parts = [message[i:i + 2000] for i in range(0, len(message), 2000)]
         for part in parts:
             data = {"content": part}
             try:
-                response = requests.post(self.webhook_url, json=data)
+                response = self.session.post(self.webhook_url, json=data, timeout=10)
                 response.raise_for_status()
             except requests.RequestException as e:
                 logging.error(f"Failed to send message to Discord: {str(e)}")
 
+    def format_message(self, change_type, title, details, domain):
+        product_url = f"https://{domain}/products/{details['handle']}"
+        if change_type == 'added':
+            message = f"**[{title}]({product_url})**\n"
+            for variant in details.get('variants', []):
+                variant_id = variant.get('id')
+                size = variant.get('option1')
+                variant_url = f"https://{domain}/cart/{variant_id}:1"
+                message += f"[{variant_id}]({variant_url}), {size}\n"
+        else:
+            message = f"**[{title}]({product_url})**\n"
+        return message
+
     def monitor_products(self, url):
-        """
-        Monitor product changes and notify via Discord if changes are detected.
-        """
         domain = urlparse(url).netloc
         current_data = self.fetch_products_json(url)
-        if domain in self.previous_data and self.previous_data[domain]:
+        if domain in self.previous_data:
             changes = self.detect_changes(self.previous_data[domain], current_data)
-            if changes and (changes['added'] or changes['removed']):
-                for title, details in changes['added'].items():
-                    product_url = f"https://{domain}/products/{details['handle']}"
-                    message = f"Added Product: **[{title}]({product_url})**\n"
-                    for variant in details.get('variants', []):
-                        variant_id = variant.get('id')
-                        price = variant.get('price')
-                        size = variant.get('option1')
-                        variant_url = f"https://{domain}/cart/{variant_id}:1"  # URL format for the variant
-                        message += f"   [{variant_id}]({variant_url}), {size}  \n"
+            for change_type in ['added', 'removed']:
+                for title, details in changes[change_type].items():
+                    message = self.format_message(change_type, title, details, domain)
                     self.send_to_discord(message)
-                for title, details in changes['removed'].items():
-                    product_url = f"https://{domain}/products/{details['handle']}"
-                    message = f"Removed Product: **[{title}]({product_url})**\n"
-                    self.send_to_discord(message)
-            else:
+            if not changes['added'] and not changes['removed']:
                 logging.info(f"No changes detected for {domain}.")
         else:
             logging.info(f"Monitoring started for {domain}, waiting for next check to detect changes.")
         self.previous_data[domain] = current_data
 
     def run(self):
-        """
-        Schedule the monitoring tasks and run them.
-        """
         for url in self.urls:
-            schedule.every(5).minutes.do(self.monitor_products, url)
+            schedule.every(5). minutes.do(self.monitor_products, url)
         while True:
             schedule.run_pending()
             time.sleep(1)
 
-# Example usage, this should be managed via a configuration.
-urls = [
-    ""
-]
-webhook_url = ""
+# Example usage, configure URLs and webhook URL as needed
+urls = ["https://littlesleepies.com/collections/vip-early-access/products.json"]
+webhook_url = "https://discord.com/api/webhooks/1235253045445529670/3IQWJNQowVCLoehrgC0tOz1hgmDqwLS9jLH0AJ8gxzcMlCxdgA0xAAa5xnOK1usRdfxL"
 
-# To run:
 monitor = ProductMonitor(urls, webhook_url)
 monitor.run()
